@@ -10,6 +10,7 @@ use ocrs::{ImageSource, OcrEngine, OcrEngineParams};
 use rten::Model;
 #[allow(unused)]
 use rten_tensor::prelude::*;
+use std::process::Command;
 
 struct Args {
     root_path: String,
@@ -140,19 +141,14 @@ fn main() -> Result<()> {
         .par_iter()
         .map(|found_image| -> Result<Img> {
             println!("Scanning {}", found_image.display());
-            let img = image::open(found_image)?.into_rgb8();
-            let img_source = ImageSource::from_bytes(img.as_raw(), img.dimensions())?;
-            let ocr_input = engine.prepare_input(img_source)?;
 
-            let word_rects = engine.detect_words(&ocr_input)?;
-            let line_rects = engine.find_text_lines(&ocr_input, &word_rects);
-            let line_texts = engine.recognize_text(&ocr_input, &line_rects)?;
-
-            let lines = line_texts
-                .iter()
-                .flatten()
-                .filter(|l| l.to_string().len() > 1)
-                .map(|l| l.to_string())
+            let output =
+                Command::new("/Users/ryanlabouve/code/evileye-swift/.build/debug/evileye-swift")
+                    .arg(found_image.display().to_string())
+                    .output()?;
+            let lines = String::from_utf8(output.stdout)?
+                .lines()
+                .map(|line| line.to_string())
                 .collect::<Vec<String>>();
 
             Ok(Img {
