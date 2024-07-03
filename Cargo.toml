@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.86"
+futures = "0.3.30"
 fuzzy-matcher = "0.3.7"
 image = "0.25.1"
 lexopt = "0.3.0"
@@ -15,4 +16,5 @@ rayon = "1.10.0"
 regex = "1.10.5"
 rten = "0.10.0"
 rten-tensor = "0.10.0"
+tokio = { version = "1.38.0", features = ["rt", "rt-multi-thread", "macros", "full"] }
 walkdir = "2.5.0"

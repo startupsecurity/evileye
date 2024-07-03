@@ -1,10 +1,10 @@
 use anyhow::Result;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use rayon::prelude::*;
 use regex::Regex;
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ocrs::{ImageSource, OcrEngine, OcrEngineParams};
 use rten::Model;
@@ -53,40 +53,48 @@ fn file_path(path: &str) -> PathBuf {
     abs_path
 }
 
-fn find_images_in_directory_concurrent(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut images = Vec::new();
+async fn find_images_in_directory_concurrent(dir: &Path) -> Result<Vec<PathBuf>> {
     let image_extensions = ["jpg", "jpeg", "png", "gif", "bmp", "tiff"]
         .iter()
         .map(|&s| s.to_string())
         .collect::<HashSet<String>>();
-    let (tx, rx) = std::sync::mpsc::channel();
+    let mut images = Vec::new();
 
-    walkdir::WalkDir::new(dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_file())
-        .for_each(|entry| {
-            let tx = tx.clone();
-            let image_extensions = image_extensions.clone();
-            std::thread::spawn(move || {
-                let path = entry.path();
-                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    if image_extensions.contains(&ext.to_lowercase()) {
-                        tx.send(path.to_path_buf()).expect("Failed to send path");
-                    }
+    let dir = dir.to_path_buf(); // Clone the dir path
+    let entries = tokio::task::spawn_blocking(move || {
+        walkdir::WalkDir::new(&dir) // Use the cloned dir
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
+            .collect::<Vec<_>>()
+    })
+    .await?;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(entries.len());
+
+    for entry in entries {
+        let tx = tx.clone();
+        let image_extensions = image_extensions.clone();
+        tokio::spawn(async move {
+            let path = entry.path();
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if image_extensions.contains(&ext.to_lowercase()) {
+                    tx.send(path.to_path_buf())
+                        .await
+                        .expect("Failed to send path");
                 }
-            });
+            }
         });
+    }
 
     drop(tx);
 
-    for path in rx {
+    while let Some(path) = rx.recv().await {
         images.push(path);
     }
 
     Ok(images)
 }
-
 fn detect_secrets(data: &str) -> bool {
     // TODO pull from more standard list
     let patterns = vec![
@@ -112,7 +120,35 @@ fn detect_secrets(data: &str) -> bool {
     false
 }
 
-fn main() -> Result<()> {
+async fn process_image_with_ocr(
+    found_image: PathBuf,
+    engine: Arc<OcrEngine>,
+) -> Result<Img, anyhow::Error> {
+    println!("Scanning {}", found_image.display());
+    let img = image::open(found_image.clone())?.into_rgb8(); // Clone `found_image` here
+    let img_source = ImageSource::from_bytes(img.as_raw(), img.dimensions())?;
+    let ocr_input = engine.prepare_input(img_source)?;
+
+    let word_rects = engine.detect_words(&ocr_input)?;
+    let line_rects = engine.find_text_lines(&ocr_input, &word_rects);
+    let line_texts = engine.recognize_text(&ocr_input, &line_rects)?;
+
+    let lines = line_texts
+        .iter()
+        .flatten()
+        .filter(|l| l.to_string().len() > 1)
+        .map(|l| l.to_string())
+        .collect::<Vec<String>>();
+
+    Ok(Img {
+        path: found_image.to_string_lossy().to_string(), // `found_image` is still available for use
+        text: lines.join("\n"),
+        has_secrets: false,
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
     // Reference: https://github.com/robertknight/ocrs/blob/main/ocrs/examples/hello_ocr.rs
     // Use the `download-models.sh` script to download the models.
 
@@ -121,56 +157,41 @@ fn main() -> Result<()> {
 
     println!("Running evileye from {}", system_root.display());
 
-    let found_images = find_images_in_directory_concurrent(system_root)?;
+    let found_images = find_images_in_directory_concurrent(system_root).await?;
     let detection_model_path = file_path("./text-detection.rten");
     let rec_model_path = file_path("./text-recognition.rten");
 
     let detection_model = Model::load_file(detection_model_path)?;
     let recognition_model = Model::load_file(rec_model_path)?;
 
-    let engine = OcrEngine::new(OcrEngineParams {
+    let engine = Arc::new(OcrEngine::new(OcrEngineParams {
         detection_model: Some(detection_model),
         recognition_model: Some(recognition_model),
         ..Default::default()
-    })?;
+    })?);
 
     println!("Number of found images: {}", found_images.len());
 
-    let mut results = found_images
-        .par_iter()
-        .map(|found_image| -> Result<Img> {
-            println!("Scanning {}", found_image.display());
-            let img = image::open(found_image)?.into_rgb8();
-            let img_source = ImageSource::from_bytes(img.as_raw(), img.dimensions())?;
-            let ocr_input = engine.prepare_input(img_source)?;
+    let image_futures = found_images.into_iter().map(|found_image| {
+        let engine = Arc::clone(&engine);
+        tokio::spawn(async move { process_image_with_ocr(found_image, engine).await })
+    });
 
-            let word_rects = engine.detect_words(&ocr_input)?;
-            let line_rects = engine.find_text_lines(&ocr_input, &word_rects);
-            let line_texts = engine.recognize_text(&ocr_input, &line_rects)?;
-
-            let lines = line_texts
-                .iter()
-                .flatten()
-                .filter(|l| l.to_string().len() > 1)
-                .map(|l| l.to_string())
-                .collect::<Vec<String>>();
-
-            Ok(Img {
-                path: found_image.to_string_lossy().to_string(),
-                text: lines.join("\n"),
-                has_secrets: false,
-            })
-        })
-        .collect::<Result<Vec<Img>, _>>()?;
-
+    let mut results = futures::future::try_join_all(image_futures).await?;
     for img in &mut results {
-        img.has_secrets = detect_secrets(&img.text);
+        if let Ok(img) = img {
+            img.has_secrets = detect_secrets(&img.text);
 
-        println!("Image Path: {}", img.path);
-        println!("Extracted Text:\n{}", img.text);
-        println!("Contains Secrets: {}", img.has_secrets);
-
-        println!("-----------------------------------");
+            println!("-----------------------------------");
+            println!("Image Path: {}", img.path);
+            println!("Extracted Text:\n{}", img.text);
+            println!("Contains Secrets: {}", img.has_secrets);
+            println!("-----------------------------------");
+        } else {
+            println!("-----------------------------------");
+            println!("Error processing image: {:?}", img);
+            println!("-----------------------------------");
+        }
     }
     Ok(())
 }
