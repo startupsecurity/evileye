@@ -1,8 +1,9 @@
 use anyhow::Result;
+use clap::{Arg, Command};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use regex::Regex;
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -22,27 +23,19 @@ struct Img {
     has_secrets: bool,
 }
 
-fn parse_args() -> Result<Args, lexopt::Error> {
-    use lexopt::prelude::*;
+fn parse_args() -> Result<Args> {
+    let matches = Command::new("evileye")
+        .version("0.1.0")
+        .about("Scans images for text and secrets")
+        .arg(
+            Arg::new("root_path")
+                .help("The root path to scan for images")
+                .required(true)
+                .index(1),
+        )
+        .get_matches();
 
-    let mut values = VecDeque::new();
-    let mut parser = lexopt::Parser::from_env();
-
-    while let Some(arg) = parser.next()? {
-        match arg {
-            Value(val) => values.push_back(val.string()?),
-            Long("help") => {
-                println!(
-                    "Usage: {bin_name} <root_path>",
-                    bin_name = parser.bin_name().unwrap_or("evileye")
-                );
-                std::process::exit(0);
-            }
-            _ => return Err(arg.unexpected()),
-        }
-    }
-
-    let root_path = values.pop_front().ok_or("missing `root_path` arg")?;
+    let root_path = matches.get_one::<String>("root_path").unwrap().clone();
 
     Ok(Args { root_path })
 }

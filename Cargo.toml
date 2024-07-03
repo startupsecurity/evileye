@@ -7,12 +7,12 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.86"
+clap = "4.5.8"
 futures = "0.3.30"
 fuzzy-matcher = "0.3.7"
 image = "0.25.1"
 lexopt = "0.3.0"
 ocrs = "0.8.0"
-rayon = "1.10.0"
 regex = "1.10.5"
 rten = "0.10.0"
 rten-tensor = "0.10.0"
